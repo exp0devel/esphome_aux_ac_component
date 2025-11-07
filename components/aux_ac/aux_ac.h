@@ -1582,6 +1582,96 @@ namespace esphome
 
                 // вначале выводим полученный пакет в лог, чтобы он шел до информации об ответах и т.п.
                 _debugPrintPacket(&_inPacket, ESPHOME_LOG_LEVEL_DEBUG, __LINE__);
+                // --- BEGIN: quick 0x66 0x98 triplet sniffer (works with display_inverted: false) ---
+                {
+                const uint8_t *buf = _inPacket.data;
+                const size_t   len = _inPacket.bytesLoaded;
+
+                // collect candidates that follow 66 98
+                uint8_t mode_cand = 0, fan_cand = 0, power_cand = 0, set_cand = 0;
+                bool have_mode=false, have_fan=false, have_power=false, have_set=false;
+
+                for (size_t i = 0; i + 2 < len; ++i) {
+                    if (buf[i] == 0x66 && buf[i+1] == 0x98) {
+                    uint8_t v = buf[i+2];
+
+                    // POWER: prefer exact 0xE0 (ON) or 0x00 (OFF)
+                    if (!have_power && (v == 0xE0 || v == 0x00)) {
+                        power_cand = v;
+                        have_power = true;
+                    }
+
+                    // MODE: high bits must match AUX/Ballu set and value should be "biggish"
+                    if (!have_mode && v >= 0x60) {
+                        uint8_t top = v & 0xE0;
+                        if (top == 0x00 || top == 0x20 || top == 0x40 || top == 0x80 || top == 0xC0) {
+                        mode_cand = top;
+                        have_mode = true;
+                        }
+                    }
+
+                    // FAN: high bits in the fan set and value "biggish"
+                    if (!have_fan && v >= 0x60) {
+                        uint8_t top = v & 0xE0;
+                        if (top == 0x20 || top == 0x40 || top == 0x60 || top == 0xA0) {
+                        fan_cand = top;
+                        have_fan = true;
+                        }
+                    }
+
+                    // TEMP(Set): accept values that look like setpoint+offset
+                    if (!have_set && v >= 0x10 && v <= 0x28) {
+                        set_cand = v;
+                        have_set = true;
+                    }
+                    }
+                }
+
+                bool stateChangedFlag = false;
+
+                // POWER
+                if (have_power) {
+                    uint8_t stateByte = (power_cand == 0xE0) ? AC_POWER_ON : AC_POWER_OFF;
+                    if (_current_ac_state.power != (ac_power)stateByte) stateChangedFlag = true;
+                    _current_ac_state.power = (ac_power)stateByte;
+                    ESP_LOGD("AirCon", "Sniffer POWER = %s", (stateByte==AC_POWER_ON)?"ON":"OFF");
+                }
+
+                // MODE
+                if (have_mode) {
+                    uint8_t stateByte = (uint8_t)(mode_cand & AC_MODE_MASK);
+                    if (_current_ac_state.mode != (ac_mode)stateByte) stateChangedFlag = true;
+                    _current_ac_state.mode = (ac_mode)stateByte;
+                    ESP_LOGD("AirCon", "Sniffer MODE  = %02X", stateByte);
+                }
+
+                // FAN
+                if (have_fan) {
+                    uint8_t stateByte = (uint8_t)(fan_cand & AC_FANSPEED_MASK);
+                    if (_current_ac_state.fanSpeed != (ac_fanspeed)stateByte) stateChangedFlag = true;
+                    _current_ac_state.fanSpeed = (ac_fanspeed)stateByte;
+                    ESP_LOGD("AirCon", "Sniffer FAN   = %02X", stateByte);
+                }
+
+                // TEMP SETPOINT (°C)
+                if (have_set) {
+                    // default offset works for your earlier logs: 0x1E → 18°C
+                    const int OFFSET = 12;   // change to 11 or 13 if off-by-1
+                    int set_c = (int)set_cand - OFFSET;
+                    if (set_c < 16) set_c = 16;
+                    if (set_c > 32) set_c = 32;
+                    float new_target = (float)set_c;
+                    if (_current_ac_state.temp_target != new_target) stateChangedFlag = true;
+                    _current_ac_state.temp_target = new_target;
+                    ESP_LOGD("AirCon", "Sniffer SET   = %d°C (raw=%02X)", set_c, set_cand);
+                }
+
+                // publish if anything changed
+                if (stateChangedFlag) {
+                    this->stateChanged = true;
+                }
+                }
+                // --- END: quick sniffer ---                
                 // --- Ballu auto-mapping from normalized raw (pattern-based “just works” parser) ---
                 {
                     uint8_t m=0, f=0, sh=0, sv=0, p=0, setc=0;

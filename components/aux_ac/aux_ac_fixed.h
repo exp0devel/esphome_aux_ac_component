@@ -1619,7 +1619,7 @@ namespace esphome
             }
 
             if (stateChangedFlag) {
-            stateChanged();   // publish the new state
+                stateChanged();
             }
             }
             // --- END: quick sniffer ---
@@ -1631,7 +1631,6 @@ namespace esphome
                 // same update pattern as above…
             }
             }
-            {
                 if (!_checkCRC(&_inPacket))
                 {
                     _debugMsg(F("Parser: packet CRC fail!"), ESPHOME_LOG_LEVEL_ERROR, __LINE__);

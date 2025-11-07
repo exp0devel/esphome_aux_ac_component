@@ -1582,71 +1582,7 @@ namespace esphome
 
                 // вначале выводим полученный пакет в лог, чтобы он шел до информации об ответах и т.п.
                 _debugPrintPacket(&_inPacket, ESPHOME_LOG_LEVEL_DEBUG, __LINE__);
-                // --- BEGIN: quick 0x66 0x98 triplet sniffer (works with display_inverted: false) ---
-                {
-                const uint8_t *buf = _inPacket.data;
-                const size_t   len = _inPacket.bytesLoaded;
-
-                uint8_t mode_cand=0, fan_cand=0, power_cand=0, set_cand=0;
-                bool have_mode=false, have_fan=false, have_power=false, have_set=false;
-
-                for (size_t i = 0; i + 2 < len; ++i) {
-                    if (buf[i] == 0x66 && buf[i+1] == 0x98) {
-                    uint8_t v = buf[i+2];
-
-                    if (!have_power && (v == 0xE0 || v == 0x00)) { power_cand=v; have_power=true; }
-                    if (!have_mode  && v >= 0x60) {
-                        uint8_t top = v & 0xE0;
-                        if (top == 0x00 || top == 0x20 || top == 0x40 || top == 0x80 || top == 0xC0) { mode_cand=top; have_mode=true; }
-                    }
-                    if (!have_fan   && v >= 0x60) {
-                        uint8_t top = v & 0xE0;
-                        if (top == 0x20 || top == 0x40 || top == 0x60 || top == 0xA0) { fan_cand=top; have_fan=true; }
-                    }
-                    if (!have_set && v >= 0x10 && v <= 0x28) { set_cand=v; have_set=true; }
-                    }
-                }
-
-                bool stateChangedFlag = false;
-
-                if (have_power) {
-                    uint8_t b = (power_cand == 0xE0) ? AC_POWER_ON : AC_POWER_OFF;
-                    if (_current_ac_state.power != (ac_power)b) stateChangedFlag = true;
-                    _current_ac_state.power = (ac_power)b;
-                }
-                if (have_mode) {
-                    uint8_t b = (uint8_t)(mode_cand & AC_MODE_MASK);
-                    if (_current_ac_state.mode != (ac_mode)b) stateChangedFlag = true;
-                    _current_ac_state.mode = (ac_mode)b;
-                }
-                if (have_fan) {
-                    uint8_t b = (uint8_t)(fan_cand & AC_FANSPEED_MASK);
-                    if (_current_ac_state.fanSpeed != (ac_fanspeed)b) stateChangedFlag = true;
-                    _current_ac_state.fanSpeed = (ac_fanspeed)b;
-                }
-                if (have_set) {
-                    const int OFFSET = 12;
-                    int set_c = (int)set_cand - OFFSET;
-                    if (set_c < 16) set_c = 16;
-                    if (set_c > 32) set_c = 32;
-                    float t = (float)set_c;
-                    if (_current_ac_state.temp_target != t) stateChangedFlag = true;
-                    _current_ac_state.temp_target = t;
-                }
-
-                if (stateChangedFlag) {
-                    this->stateChanged = true;
-                }
-                }
-                // --- END: quick sniffer ---
-
-                // --- Ballu auto-mapping (pattern-based) ---
-                {
-                uint8_t m=0,f=0,sh=0,sv=0,p=0,setc=0;
-                if (_ballu_infer_fields_(_inPacket.data, _inPacket.bytesLoaded, &m, &f, &sh, &sv, &p, &setc)) {
-                    // same update pattern as above…
-                }
-                }
+                // --- Ballu auto-mapping from normalized raw (pattern-based “just works” parser) ---
                 {
                     uint8_t m=0, f=0, sh=0, sv=0, p=0, setc=0;
                     if (_ballu_infer_fields_(_inPacket.data, _inPacket.bytesLoaded, &m, &f, &sh, &sv, &p, &setc)) {
@@ -1697,7 +1633,6 @@ namespace esphome
                                 ESPHOME_LOG_LEVEL_DEBUG, __LINE__, m, f, sh, sv, p, (unsigned)setc);
                     }
                 }
-                
                 // разбираем тип пакета
                 switch (_inPacket.header->packet_type)
                 {

@@ -13,14 +13,42 @@
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/uart/uart.h"
-#include "esphome/components/ballu/ballu.h"
+#include "esphome/core/component.h"
+#include "esphome/core/helpers.h"
+
+// --- Begin: Local Ballu protocol constants (shim, no external include needed) ---
+namespace esphome { namespace ballu {
+// Temperature limits used by Ballu (YKR-K-002E)
+constexpr float YKR_K_002E_TEMP_MIN = 16.0f;
+constexpr float YKR_K_002E_TEMP_MAX = 32.0f;
+
+// Modes (mask 0b11100000)
+constexpr uint8_t BALLU_AUTO = 0x00;
+constexpr uint8_t BALLU_COOL = 0x20;
+constexpr uint8_t BALLU_DRY  = 0x40;
+constexpr uint8_t BALLU_HEAT = 0x80;
+constexpr uint8_t BALLU_FAN  = 0xC0;
+
+// Fan speeds (mask 0b11100000)
+constexpr uint8_t BALLU_FAN_HIGH = 0x20;
+constexpr uint8_t BALLU_FAN_MED  = 0x40;
+constexpr uint8_t BALLU_FAN_LOW  = 0x60;
+constexpr uint8_t BALLU_FAN_AUTO = 0xA0;
+
+// Swing masks/values
+constexpr uint8_t BALLU_SWING_HOR = 0xE0; // horizontal swing mask/value
+constexpr uint8_t BALLU_SWING_VER = 0x07; // vertical swing mask/value
+
+// Power bit (mask 0b00100000)
+constexpr uint8_t BALLU_POWER = 0x20;
+}} // namespace esphome::ballu
+// --- End: Local Ballu protocol constants (shim) ---
+
 static_assert((int)esphome::ballu::BALLU_COOL == 0x20, "BALLU_COOL mismatch");
 static_assert((int)esphome::ballu::BALLU_FAN_AUTO == 0xA0, "BALLU_FAN_AUTO mismatch");
 static_assert((int)esphome::ballu::BALLU_SWING_HOR == 0xE0, "BALLU_SWING_HOR mask mismatch");
 static_assert((int)esphome::ballu::BALLU_SWING_VER == 0x07, "BALLU_SWING_VER mask mismatch");
 static_assert((int)esphome::ballu::BALLU_POWER    == 0x20, "BALLU_POWER mismatch");
-#include "esphome/core/component.h"
-#include "esphome/core/helpers.h"
 
 #ifndef USE_ARDUINO
 using String = std::string;

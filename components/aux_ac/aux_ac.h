@@ -50,6 +50,28 @@ static_assert((int)esphome::ballu::BALLU_SWING_HOR == 0xE0, "BALLU_SWING_HOR mas
 static_assert((int)esphome::ballu::BALLU_SWING_VER == 0x07, "BALLU_SWING_VER mask mismatch");
 static_assert((int)esphome::ballu::BALLU_POWER    == 0x20, "BALLU_POWER mismatch");
 
+// Compact a 34-byte raw block into a 17-byte "normalized" payload by collapsing complement pairs.
+inline void normalize_and_dump_(const uint8_t* raw, size_t len) {
+  if (len % 2 != 0) return;
+  const size_t out_len = len / 2;
+  uint8_t out[64] = {0};
+  for (size_t i = 0, j = 0; i + 1 < len && j < sizeof(out); i += 2, ++j) {
+    uint8_t a = raw[i], b = raw[i + 1];
+    if ( (uint8_t)(a ^ b) == 0xFE || (uint8_t)(a + b) == 0xFE ) {
+      out[j] = a;
+    } else {
+      out[j] = a;  // keep first byte if it’s not a clean complement; we’ll inspect later
+    }
+  }
+  // Dump a compact line so we can pattern-match fields later
+  char line[256]; size_t p = 0;
+  p += snprintf(line + p, sizeof(line) - p, "Normalized(%u): ", (unsigned)out_len);
+  for (size_t k = 0; k < out_len && p + 3 < sizeof(line); ++k)
+    p += snprintf(line + p, sizeof(line) - p, "%02X ", out[k]);
+  ESP_LOGD("AirCon", "%s", line);
+  normalize_and_dump_(raw_buf, raw_len);  // args are the same buffer/length you just printed
+}
+
 #ifndef USE_ARDUINO
 using String = std::string;
 #define F(string_literal) (string_literal)

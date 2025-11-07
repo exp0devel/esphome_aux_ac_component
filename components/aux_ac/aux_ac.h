@@ -69,7 +69,6 @@ inline void normalize_and_dump_(const uint8_t* raw, size_t len) {
   for (size_t k = 0; k < out_len && p + 3 < sizeof(line); ++k)
     p += snprintf(line + p, sizeof(line) - p, "%02X ", out[k]);
   ESP_LOGD("AirCon", "%s", line);
-  normalize_and_dump_(raw_buf, raw_len);  // args are the same buffer/length you just printed
 }
 
 #ifndef USE_ARDUINO
@@ -1326,6 +1325,7 @@ namespace esphome
                     {
                         _debugMsg(F("Start byte received but there are some unparsed bytes in the buffer:"), ESPHOME_LOG_LEVEL_DEBUG, __LINE__);
                         _debugPrintPacket(&_inPacket, ESPHOME_LOG_LEVEL_DEBUG, __LINE__);
+                        normalize_and_dump_(_inPacket.data, _inPacket.bytesLoaded);   // << add this
                     }
                     _clearInPacket();
                     _inPacket.msec = millis();
@@ -1349,6 +1349,7 @@ namespace esphome
                         {
                             _debugMsg(F("Some unparsed data on the bus:"), ESPHOME_LOG_LEVEL_DEBUG, __LINE__);
                             _debugPrintPacket(&_inPacket, ESPHOME_LOG_LEVEL_DEBUG, __LINE__);
+                            normalize_and_dump_(_inPacket.data, _inPacket.bytesLoaded);   // << add this
                             _clearInPacket();
                         }
                     }
@@ -1395,6 +1396,7 @@ namespace esphome
                         _debugMsg(F("Packet loaded: timestamp = %010u, start byte = %02X, packet type = %02X, body size = %02X, crc = [%02X, %02X]."), ESPHOME_LOG_LEVEL_VERBOSE, __LINE__, _inPacket.msec, _inPacket.header->start_byte, _inPacket.header->packet_type, _inPacket.header->body_length, _inPacket.crc->crc[0], _inPacket.crc->crc[1]);
                         _debugMsg(F("Loaded %02u bytes for a %u ms."), ESPHOME_LOG_LEVEL_VERBOSE, __LINE__, _inPacket.bytesLoaded, (millis() - _inPacket.msec));
                         _debugPrintPacket(&_inPacket, ESPHOME_LOG_LEVEL_VERBOSE, __LINE__);
+                        normalize_and_dump_(_inPacket.data, _inPacket.bytesLoaded);   // << add this
                         _setStateMachineState(ACSM_PARSING_PACKET);
                         return;
                     }
@@ -1714,6 +1716,7 @@ namespace esphome
 
                 _debugPrintPacket(&_outPacket, ESPHOME_LOG_LEVEL_DEBUG, __LINE__);
                 _debugMsg(F("Sender: %u bytes sent (%u ms)."), ESPHOME_LOG_LEVEL_VERBOSE, __LINE__, _outPacket.bytesLoaded, millis() - _outPacket.msec);
+                normalize_and_dump_(_outPacket.data, _outPacket.bytesLoaded); // << optional
                 _clearOutPacket();
 
                 _setStateMachineState(ACSM_IDLE);

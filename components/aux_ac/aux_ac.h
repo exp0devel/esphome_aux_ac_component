@@ -1619,7 +1619,7 @@ namespace esphome
             }
 
             if (stateChangedFlag) {
-                this->stateChanged = true;
+            stateChanged();   // publish the new state
             }
             }
             // --- END: quick sniffer ---

@@ -1571,56 +1571,6 @@ namespace esphome
                 {
                     _debugMsg(F("Parser: packet CRC fail!"), ESPHOME_LOG_LEVEL_ERROR, __LINE__);
                     _debugPrintPacket(&_inPacket, ESPHOME_LOG_LEVEL_ERROR, __LINE__);
-                    // --- Ballu auto-mapping from normalized raw (pattern-based “just works” parser) ---
-                    {
-                        uint8_t m=0, f=0, sh=0, sv=0, p=0, setc=0;
-                        if (_ballu_infer_fields_(_inPacket.data, _inPacket.bytesLoaded, &m, &f, &sh, &sv, &p, &setc)) {
-
-                        // MODE
-                        if (m) {
-                            uint8_t stateByte = (uint8_t)(m & AC_MODE_MASK);
-                            if (_current_ac_state.mode != (ac_mode)stateByte) stateChangedFlag = true;
-                            _current_ac_state.mode = (ac_mode)stateByte;
-                        }
-
-                        // FAN
-                        if (f) {
-                            uint8_t stateByte = (uint8_t)(f & AC_FANSPEED_MASK);
-                            if (_current_ac_state.fanSpeed != (ac_fanspeed)stateByte) stateChangedFlag = true;
-                            _current_ac_state.fanSpeed = (ac_fanspeed)stateByte;
-                        }
-
-                        // SWING H
-                        if (sh) {
-                            uint8_t stateByte = (uint8_t)(sh & AC_LOUVERH_MASK);
-                            if (_current_ac_state.louver.louver_h != (ac_louver_H)stateByte) stateChangedFlag = true;
-                            _current_ac_state.louver.louver_h = (ac_louver_H)stateByte;
-                        }
-
-                        // SWING V
-                        {
-                            uint8_t stateByte = (uint8_t)(sv & AC_LOUVERV_MASK);
-                            if (_current_ac_state.louver.louver_v != (ac_louver_V)stateByte) stateChangedFlag = true;
-                            _current_ac_state.louver.louver_v = (ac_louver_V)stateByte;
-                        }
-
-                        // POWER
-                        {
-                            uint8_t stateByte = (uint8_t)((p & AC_POWER_MASK) ? AC_POWER_ON : AC_POWER_OFF);
-                            if (_current_ac_state.power != (ac_power)stateByte) stateChangedFlag = true;
-                            _current_ac_state.power = (ac_power)stateByte;
-                        }
-
-                        // SET TEMPERATURE °C
-                        if (setc >= 16 && setc <= 32) {
-                            if (_current_ac_state.temperature.set_c != (uint8_t)setc) stateChangedFlag = true;
-                            _current_ac_state.temperature.set_c = (uint8_t)setc;
-                        }
-
-                        _debugMsg(F("Ballu-map applied (mode=%02X fan=%02X sh=%02X sv=%02X power=%02X set=%u)"),
-                                    ESPHOME_LOG_LEVEL_DEBUG, __LINE__, m, f, sh, sv, p, (unsigned)setc);
-                        }
-                    }
                     _clearInPacket();
                     _setStateMachineState(ACSM_IDLE);
                     return;
@@ -1632,7 +1582,57 @@ namespace esphome
 
                 // вначале выводим полученный пакет в лог, чтобы он шел до информации об ответах и т.п.
                 _debugPrintPacket(&_inPacket, ESPHOME_LOG_LEVEL_DEBUG, __LINE__);
+                // --- Ballu auto-mapping from normalized raw (pattern-based “just works” parser) ---
+                {
+                    uint8_t m=0, f=0, sh=0, sv=0, p=0, setc=0;
+                    if (_ballu_infer_fields_(_inPacket.data, _inPacket.bytesLoaded, &m, &f, &sh, &sv, &p, &setc)) {
 
+                    // MODE
+                    if (m) {
+                        uint8_t stateByte = (uint8_t)(m & AC_MODE_MASK);
+                        if (_current_ac_state.mode != (ac_mode)stateByte) stateChangedFlag = true;
+                        _current_ac_state.mode = (ac_mode)stateByte;
+                    }
+
+                    // FAN
+                    if (f) {
+                        uint8_t stateByte = (uint8_t)(f & AC_FANSPEED_MASK);
+                        if (_current_ac_state.fanSpeed != (ac_fanspeed)stateByte) stateChangedFlag = true;
+                        _current_ac_state.fanSpeed = (ac_fanspeed)stateByte;
+                    }
+
+                    // SWING H (0xE0) if seen
+                    if (sh) {
+                        uint8_t stateByte = (uint8_t)(sh & AC_LOUVERH_MASK);
+                        if (_current_ac_state.louver.louver_h != (ac_louver_H)stateByte) stateChangedFlag = true;
+                        _current_ac_state.louver.louver_h = (ac_louver_H)stateByte;
+                    }
+
+                    // SWING V (0..7) — always safe to update; if not detected sv==0 so this is a no-op
+                    {
+                        uint8_t stateByte = (uint8_t)(sv & AC_LOUVERV_MASK);
+                        if (_current_ac_state.louver.louver_v != (ac_louver_V)stateByte) stateChangedFlag = true;
+                        _current_ac_state.louver.louver_v = (ac_louver_V)stateByte;
+                    }
+
+                    // POWER (bit 0x20)
+                    {
+                        uint8_t stateByte = (uint8_t)((p & AC_POWER_MASK) ? AC_POWER_ON : AC_POWER_OFF);
+                        if (_current_ac_state.power != (ac_power)stateByte) stateChangedFlag = true;
+                        _current_ac_state.power = (ac_power)stateByte;
+                    }
+
+                    // SET TEMPERATURE in °C → update temp_target (float) if detected
+                    if (setc >= 16 && setc <= 32) {
+                        float new_target = (float)setc;
+                        if (_current_ac_state.temp_target != new_target) stateChangedFlag = true;
+                        _current_ac_state.temp_target = new_target;
+                    }
+
+                    _debugMsg(F("Ballu-map applied (mode=%02X fan=%02X sh=%02X sv=%02X power=%02X set=%u)"),
+                                ESPHOME_LOG_LEVEL_DEBUG, __LINE__, m, f, sh, sv, p, (unsigned)setc);
+                    }
+                }
                 // разбираем тип пакета
                 switch (_inPacket.header->packet_type)
                 {

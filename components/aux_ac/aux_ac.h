@@ -50,26 +50,99 @@ static_assert((int)esphome::ballu::BALLU_SWING_HOR == 0xE0, "BALLU_SWING_HOR mas
 static_assert((int)esphome::ballu::BALLU_SWING_VER == 0x07, "BALLU_SWING_VER mask mismatch");
 static_assert((int)esphome::ballu::BALLU_POWER    == 0x20, "BALLU_POWER mismatch");
 
-// Compact a 34-byte raw block into a 17-byte "normalized" payload by collapsing complement pairs.
-inline void normalize_and_dump_(const uint8_t* raw, size_t len) {
-  if (len % 2 != 0) return;
-  const size_t out_len = len / 2;
-  uint8_t out[64] = {0};
-  for (size_t i = 0, j = 0; i + 1 < len && j < sizeof(out); i += 2, ++j) {
+// Compact a raw block into a "normalized" payload (collapse complement pairs) and try to auto-detect fields.
+static inline void normalize_and_dump_(const uint8_t* raw, size_t len) {
+  if (len < 4) return;
+
+  // --- 1) Normalize by collapsing complement pairs (a^b==0xFE or (a+b)&0xFF==0xFE) ---
+  uint8_t out[96] = {0};
+  size_t out_len = 0;
+  for (size_t i = 0; i + 1 < len; ) {
     uint8_t a = raw[i], b = raw[i + 1];
-    if ( (uint8_t)(a ^ b) == 0xFE || (uint8_t)(a + b) == 0xFE ) {
-      out[j] = a;
+    if (((uint8_t)(a ^ b) == 0xFE) || (((uint8_t)(a + b)) == 0xFE)) {
+      out[out_len++] = a;
+      i += 2;
     } else {
-      out[j] = a;  // keep first byte if it’s not a clean complement; we’ll inspect later
+      out[out_len++] = a;
+      i += 1;
+    }
+    if (out_len >= sizeof(out)) break;
+  }
+  if (out_len == 0) return;
+
+  // Dump normalized line
+  {
+    char line[512]; size_t p = 0;
+    p += snprintf(line + p, sizeof(line) - p, "Normalized(%u): ", (unsigned)out_len);
+    for (size_t k = 0; k < out_len && p + 3 < sizeof(line); ++k) p += snprintf(line + p, sizeof(line) - p, "%02X ", out[k]);
+    ESP_LOGD("AirCon", "%s", line);
+  }
+
+  // --- 2) Auto-detect likely field bytes by matching Ballu masks/values ---
+  // BALLU constants (from shim)
+  using namespace esphome::ballu;
+  auto is_mode = [&](uint8_t v) { uint8_t m = v & 0xE0; return (m==BALLU_AUTO||m==BALLU_COOL||m==BALLU_DRY||m==BALLU_HEAT||m==BALLU_FAN); };
+  auto is_fan  = [&](uint8_t v) { uint8_t m = v & 0xE0; return (m==BALLU_FAN_AUTO||m==BALLU_FAN_LOW||m==BALLU_FAN_MED||m==BALLU_FAN_HIGH); };
+
+  static uint8_t prev[96]; static size_t prev_len = 0; // for change highlighting
+  int idx_power = -1, idx_mode = -1, idx_fan = -1, idx_swingH = -1, idx_swingV = -1, idx_temp = -1;
+
+  // heuristics:
+  // - power bit often sits in a flag byte that toggles only on ON/OFF; check for bit 0x20 flipping
+  // - mode/fan: look for a byte where (value & 0xE0) is a valid BALLU mode/fan
+  // - swing: look for bytes that equal 0xE0 (HOR) or 0x00..0x07 with mask 0x07 (VER)
+  // - temp: look for a byte in [16..32] (or offset-like changes of +1/-1 on temp change)
+  for (size_t i = 0; i < out_len; i++) {
+    uint8_t v = out[i];
+
+    if (idx_mode < 0 && is_mode(v)) idx_mode = (int)i;
+    if (idx_fan  < 0 && is_fan(v))  idx_fan  = (int)i;
+
+    if (idx_swingH < 0 && (v == BALLU_SWING_HOR)) idx_swingH = (int)i;
+    if (idx_swingV < 0 && (v & BALLU_SWING_VER) == v) idx_swingV = (int)i; // 0..7 patterns
+
+    // power: try to see a bit 0x20 toggling compared to previous frame
+    if (prev_len == out_len) {
+      uint8_t pv = prev[i];
+      uint8_t diff = v ^ pv;
+      if ((diff & 0x20) && idx_power < 0) idx_power = (int)i;
+    }
+
+    // temp setpoint often sits as 16..32 (°C) or nearby; also consider bytes that moved by ±1
+    if (idx_temp < 0) {
+      if (v >= 16 && v <= 32) idx_temp = (int)i;
+      else if (prev_len == out_len) {
+        int dv = (int)v - (int)prev[i];
+        if (dv == 1 || dv == -1) idx_temp = (int)i;
+      }
     }
   }
-  // Dump a compact line so we can pattern-match fields later
-  char line[256]; size_t p = 0;
-  p += snprintf(line + p, sizeof(line) - p, "Normalized(%u): ", (unsigned)out_len);
-  for (size_t k = 0; k < out_len && p + 3 < sizeof(line); ++k)
-    p += snprintf(line + p, sizeof(line) - p, "%02X ", out[k]);
-  ESP_LOGD("AirCon", "%s", line);
+
+  // summarize detections with change highlight
+  if (prev_len == out_len) {
+    auto show = [&](const char* name, int idx, const char* extra="") {
+      if (idx < 0 || (size_t)idx >= out_len) { ESP_LOGD("AirCon", "Detect %-7s : (not found)%s", name, extra); return; }
+      uint8_t now = out[idx], was = prev[idx];
+      bool chg = (now != was);
+      ESP_LOGD("AirCon", "Detect %-7s : B%02u = %02X%s %s%s",
+               name, (unsigned)idx, now, chg? " (chg)":"", extra, chg? " (prev " : "");
+      if (chg) ESP_LOGD("AirCon", "AirCon", "%02X)", was); // keep it on a separate line for compact logs
+    };
+    show("POWER",  idx_power,  " (bit 0x20)");
+    show("MODE",   idx_mode,   " (&0xE0)");
+    show("FAN",    idx_fan,    " (&0xE0)");
+    show("SWINGH", idx_swingH, "");
+    show("SWINGV", idx_swingV, "");
+    show("TEMP",   idx_temp,   "");
+  } else {
+    ESP_LOGD("AirCon", "Detect: need 2+ frames of equal length for change-based hints");
+  }
+
+  // keep previous
+  memcpy(prev, out, out_len);
+  prev_len = out_len;
 }
+
 
 #ifndef USE_ARDUINO
 using String = std::string;

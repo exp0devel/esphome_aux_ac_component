@@ -50,6 +50,84 @@ static_assert((int)esphome::ballu::BALLU_SWING_HOR == 0xE0, "BALLU_SWING_HOR mas
 static_assert((int)esphome::ballu::BALLU_SWING_VER == 0x07, "BALLU_SWING_VER mask mismatch");
 static_assert((int)esphome::ballu::BALLU_POWER    == 0x20, "BALLU_POWER mismatch");
 
+// ===== BEGIN: "just works" decoder =====
+
+// Collapse complement pairs (a^b==0xFE or (a+b)&0xFF==0xFE) into 1 byte each
+static inline size_t _ballu_normalize_pairs_(const uint8_t* raw, size_t len, uint8_t* out, size_t out_cap) {
+  size_t j = 0;
+  for (size_t i = 0; i + 1 < len; ) {
+    uint8_t a = raw[i], b = raw[i + 1];
+    if ( ((uint8_t)(a ^ b) == 0xFE) || (((uint8_t)(a + b)) == 0xFE) ) {  // complement-ish
+      if (j < out_cap) out[j++] = a;
+      i += 2;
+    } else {
+      if (j < out_cap) out[j++] = a;
+      i += 1;
+    }
+    if (j >= out_cap) break;
+  }
+  if ((len & 1) && j < out_cap) out[j++] = raw[len - 1];
+  return j;
+}
+
+// Adjust if your setpoint comes out off-by-one on your model (12 works for your logs)
+#ifndef BALLU_TEMP_OFFSET
+#define BALLU_TEMP_OFFSET 12
+#endif
+
+// Pull out fields by pattern (mode/fan masks, power bit, swing masks, temp range/steps)
+// Returns true if it found anything useful
+static inline bool _ballu_infer_fields_(
+  const uint8_t* raw, size_t len,
+  /*out*/ uint8_t* out_mode,      // AC_MODE_* masked value (0x00/0x20/0x40/0x80/0xC0)
+  /*out*/ uint8_t* out_fan,       // AC_FANSPEED_* masked value (0xA0/0x60/0x40/0x20)
+  /*out*/ uint8_t* out_swing_h,   // 0xE0 if present
+  /*out*/ uint8_t* out_swing_v,   // 0..0x07 if present
+  /*out*/ uint8_t* out_power,     // 0x20 if ON, 0x00 if OFF
+  /*out*/ uint8_t* out_set_c      // 16..32 (°C)
+) {
+  using namespace esphome::ballu;
+
+  uint8_t buf[96];
+  const size_t n = _ballu_normalize_pairs_(raw, len, buf, sizeof(buf));
+  if (n < 8) return false;
+
+  int i_mode = -1, i_fan = -1, i_sv = -1, i_sh = -1, i_pow = -1, i_temp = -1;
+
+  auto is_mode = [&](uint8_t v){ uint8_t m = v & 0xE0; return (m==BALLU_AUTO||m==BALLU_COOL||m==BALLU_DRY||m==BALLU_HEAT||m==BALLU_FAN); };
+  auto is_fan  = [&](uint8_t v){ uint8_t m = v & 0xE0; return (m==BALLU_FAN_AUTO||m==BALLU_FAN_LOW||m==BALLU_FAN_MED||m==BALLU_FAN_HIGH); };
+
+  // First-good-match strategy survives frame layout shifts
+  for (size_t i = 0; i < n; ++i) {
+    uint8_t v = buf[i];
+    if (i_mode < 0 && is_mode(v)) i_mode = (int)i;
+    if (i_fan  < 0 && is_fan(v))  i_fan  = (int)i;
+    if (i_sh   < 0 && v == BALLU_SWING_HOR) i_sh = (int)i;
+    if (i_sv   < 0 && (v & BALLU_SWING_VER) == v) i_sv = (int)i;  // 0..7
+    if (i_pow  < 0 && (v & 0x20)) i_pow = (int)i;                 // power bit often present
+    // Setpoint often encoded as (set_c + offset). Your logs suggest 0x1E at 18°C → offset ≈ 12.
+    if (i_temp < 0 && v >= 0x1C && v <= 0x28) i_temp = (int)i;     // 28h=40 dec → 28-12=16.. 1C-12=16
+  }
+
+  bool any = false;
+  if (i_mode >= 0) { *out_mode = (uint8_t)(buf[i_mode] & 0xE0); any = true; }
+  if (i_fan  >= 0) { *out_fan  = (uint8_t)(buf[i_fan]  & 0xE0); any = true; }
+  if (i_sh   >= 0) { *out_swing_h = 0xE0; any = true; }
+  if (i_sv   >= 0) { *out_swing_v = (uint8_t)(buf[i_sv] & 0x07); any = true; }
+  if (i_pow  >= 0) { *out_power   = (uint8_t)((buf[i_pow] & 0x20) ? 0x20 : 0x00); any = true; }
+  if (i_temp >= 0) {
+    int set_c = (int)buf[i_temp] - BALLU_TEMP_OFFSET;   // default 12; tweak if needed
+    if (set_c < 16) set_c = 16;
+    if (set_c > 32) set_c = 32;
+    *out_set_c = (uint8_t)set_c;
+    any = true;
+  }
+  return any;
+}
+
+// ===== END: "just works" decoder =====
+
+
 // Compact a raw block into a "normalized" payload (collapse complement pairs) and try to auto-detect fields.
 static inline void normalize_and_dump_(const uint8_t* raw, size_t len) {
   if (len < 4) return;
@@ -1493,6 +1571,56 @@ namespace esphome
                 {
                     _debugMsg(F("Parser: packet CRC fail!"), ESPHOME_LOG_LEVEL_ERROR, __LINE__);
                     _debugPrintPacket(&_inPacket, ESPHOME_LOG_LEVEL_ERROR, __LINE__);
+                    // --- Ballu auto-mapping from normalized raw (pattern-based “just works” parser) ---
+                    {
+                        uint8_t m=0, f=0, sh=0, sv=0, p=0, setc=0;
+                        if (_ballu_infer_fields_(_inPacket.data, _inPacket.bytesLoaded, &m, &f, &sh, &sv, &p, &setc)) {
+
+                        // MODE
+                        if (m) {
+                            uint8_t stateByte = (uint8_t)(m & AC_MODE_MASK);
+                            if (_current_ac_state.mode != (ac_mode)stateByte) stateChangedFlag = true;
+                            _current_ac_state.mode = (ac_mode)stateByte;
+                        }
+
+                        // FAN
+                        if (f) {
+                            uint8_t stateByte = (uint8_t)(f & AC_FANSPEED_MASK);
+                            if (_current_ac_state.fanSpeed != (ac_fanspeed)stateByte) stateChangedFlag = true;
+                            _current_ac_state.fanSpeed = (ac_fanspeed)stateByte;
+                        }
+
+                        // SWING H
+                        if (sh) {
+                            uint8_t stateByte = (uint8_t)(sh & AC_LOUVERH_MASK);
+                            if (_current_ac_state.louver.louver_h != (ac_louver_H)stateByte) stateChangedFlag = true;
+                            _current_ac_state.louver.louver_h = (ac_louver_H)stateByte;
+                        }
+
+                        // SWING V
+                        {
+                            uint8_t stateByte = (uint8_t)(sv & AC_LOUVERV_MASK);
+                            if (_current_ac_state.louver.louver_v != (ac_louver_V)stateByte) stateChangedFlag = true;
+                            _current_ac_state.louver.louver_v = (ac_louver_V)stateByte;
+                        }
+
+                        // POWER
+                        {
+                            uint8_t stateByte = (uint8_t)((p & AC_POWER_MASK) ? AC_POWER_ON : AC_POWER_OFF);
+                            if (_current_ac_state.power != (ac_power)stateByte) stateChangedFlag = true;
+                            _current_ac_state.power = (ac_power)stateByte;
+                        }
+
+                        // SET TEMPERATURE °C
+                        if (setc >= 16 && setc <= 32) {
+                            if (_current_ac_state.temperature.set_c != (uint8_t)setc) stateChangedFlag = true;
+                            _current_ac_state.temperature.set_c = (uint8_t)setc;
+                        }
+
+                        _debugMsg(F("Ballu-map applied (mode=%02X fan=%02X sh=%02X sv=%02X power=%02X set=%u)"),
+                                    ESPHOME_LOG_LEVEL_DEBUG, __LINE__, m, f, sh, sv, p, (unsigned)setc);
+                        }
+                    }
                     _clearInPacket();
                     _setStateMachineState(ACSM_IDLE);
                     return;
